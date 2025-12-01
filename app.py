@@ -117,12 +117,11 @@ def apply_manual_label_size(
     Force the ZPL label to a fixed physical size by setting ^PW (width)
     and ^LL (length) in dots.
 
-    For 203 DPI, we use 8 dpmm (8 dots/mm).
+    For 203 DPI, we use ~8 dpmm (8 dots/mm).
     10 cm  -> 100 mm -> 100 * 8 = 800 dots
     4 cm   ->  40 mm ->  40 * 8 = 320 dots
     """
-    # Rough mapping: 203 dpi ≈ 8 dpmm
-    dpmm = int(round(dpi / 25.4))  # 203 -> 8
+    dpmm = int(round(dpi / 25.4))  # 203 -> ~8
 
     width_mm = width_cm * 10.0
     height_mm = height_cm * 10.0
@@ -181,7 +180,7 @@ def extract_carton_numbers(zpl: str) -> list[str]:
         zpl,
         flags=re.IGNORECASE,
     )
-    # Deduplicate while preserving order
+    # Deduplicate while preserving order within this file
     seen = set()
     result = []
     for m in matches:
@@ -193,7 +192,8 @@ def extract_carton_numbers(zpl: str) -> list[str]:
 
 def group_sequences_from_codes(codes: list[str]) -> list[tuple[int, int]]:
     """
-    Group a list of numeric string codes (e.g. '1044217560') into contiguous sequences.
+    Group a list of numeric string codes (e.g. '1044217560') into contiguous
+    sequences for ONE FILE.
 
     Returns a list of (start_int, end_int).
     """
@@ -241,7 +241,7 @@ with col_left:
         "Choose what you want to do:",
         [
             "Option 1: Product Hangtag (standardize ZPL with OpenAI, then PDF)",
-            "Option 2: Carton Barcodes (10×4 cm @ 203 DPI → PDF + sequence check)",
+            "Option 2: Carton Barcodes (10×4 cm @ 203 DPI → PDF + per-file sequence check)",
         ],
         index=0,
     )
@@ -268,7 +268,7 @@ with col_right:
         """
 - ✅ **Option 1**: `.prn` → OpenAI standardization → LabelZoom PDF  
 - ✅ **Option 2**: `.prn` → LabelZoom PDF with **fixed 10×4 cm @ 203 DPI**  
-- 🔍 Option 2: carton sequences based **only** on the ^FD lines with the 10-digit number  
+- 🔍 Option 2 now shows **carton sequences per file** based only on the ^FD lines with the 10-digit number  
 - 📁 Option 2 filenames: `CARTON BARCODE S 50019 0023 0002.pdf` (Produto code from label)  
 - 🔐 API keys loaded from **secrets** or **environment variables**:
   - `openai_api_key` / `OPENAI_API_KEY`
@@ -311,7 +311,7 @@ if process_clicked and uploaded_files:
                         height_cm=4.0,
                         dpi=203,
                     )
-                    # Extract carton sequence number(s) and Produto code
+                    # Extract carton sequence number(s) and Produto code for THIS FILE
                     carton_numbers = extract_carton_numbers(final_zpl)
                     produto_code = extract_produto_code(final_zpl)
 
@@ -344,7 +344,7 @@ if process_clicked and uploaded_files:
         if results:
             st.success(f"Done! Processed {len(results)} file(s).")
 
-            # Per-file display
+            # Per-file display (including per-file sequences for Option 2)
             for item in results:
                 with st.expander(f"📄 {item['pdf_name']} ({item['original_name']})"):
                     st.download_button(
@@ -358,39 +358,46 @@ if process_clicked and uploaded_files:
                         value=item["zpl"],
                         height=260,
                     )
+
                     if "Carton Barcodes" in option:
                         if item["produto_code"]:
                             st.markdown(f"**Produto code detected:** `{item['produto_code']}`")
+
                         if item["carton_numbers"]:
-                            st.markdown("**Carton sequence number(s) found in this label:**")
+                            st.markdown("**Carton number(s) found in this file (from ^FD lines):**")
                             st.code(", ".join(item["carton_numbers"]))
 
-            # Global sequence analysis for Option 2
-            if "Carton Barcodes" in option:
-                all_carton_codes = []
+                            # 🔹 Per-file sequences here
+                            sequences = group_sequences_from_codes(item["carton_numbers"])
+                            st.markdown("**Carton sequence(s) for this file:**")
+                            for i, (start_int, end_int) in enumerate(sequences, start=1):
+                                if start_int == end_int:
+                                    label = f"{start_int:010d}"
+                                else:
+                                    label = f"{start_int:010d} - {end_int:010d}"
+                                st.markdown(f"- Sequence {i}: {label}")
+                        else:
+                            st.markdown("_No carton numbers detected in this file._")
+
+            # (Optional) tiny global overview if multiple files in Option 2
+            if "Carton Barcodes" in option and len(results) > 1:
+                all_cartons = []
                 for item in results:
-                    all_carton_codes.extend(item["carton_numbers"])
+                    all_cartons.extend(item["carton_numbers"])
 
-                if not all_carton_codes:
-                    st.info(
-                        "No carton sequence numbers (10-digit ^FD fields) were detected. "
-                        "If your pattern changes, we can tweak the extractor."
-                    )
-                else:
-                    sequences = group_sequences_from_codes(all_carton_codes)
-
-                    st.subheader("📦 Carton barcode sequences (from ^FD lines)")
+                if all_cartons:
+                    global_sequences = group_sequences_from_codes(all_cartons)
+                    st.subheader("📦 Global overview (all files combined)")
                     st.write(
-                        f"Detected **{len(set(all_carton_codes))}** unique carton numbers, "
-                        f"grouped into **{len(sequences)}** sequence(s)."
+                        f"Total **{len(set(all_cartons))}** unique carton numbers across all files, "
+                        f"grouped into **{len(global_sequences)}** sequence(s)."
                     )
-
-                    for i, (start_int, end_int) in enumerate(sequences, start=1):
+                    for i, (start_int, end_int) in enumerate(global_sequences, start=1):
                         if start_int == end_int:
                             label = f"{start_int:010d}"
                         else:
                             label = f"{start_int:010d} - {end_int:010d}"
-                        st.markdown(f"- **Sequence {i}:** {label}")
+                        st.markdown(f"- Global sequence {i}: {label}")
 
             # ---- Download all PDFs as one ZIP (both options) ----
             zip_buffer = io.BytesIO()
