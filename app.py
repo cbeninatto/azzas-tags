@@ -258,6 +258,28 @@ def replicate_single_page_pdf(single_page_pdf: bytes, copies: int) -> bytes:
     return out.read()
 
 
+def extract_hangtag_model_code(zpl: str) -> str | None:
+    """
+    Extract the hangtag 'code row' used for naming Option 1 PDFs.
+
+    Example line (after standardization):
+      ^FO40,74^A0N,20,20^FDC 50036 0008 0005 U^FS
+
+    We capture: "C 50036 0008 0005 U"
+    """
+    m = re.search(
+        r"\^FO40,74\^A0N,20,20\^FD(.*?)\^FS",
+        zpl,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+    code = m.group(1)
+    # Normalize internal spacing a bit, but keep the structure
+    code = re.sub(r"\s+", " ", code).strip()
+    return code if code else None
+
+
 # ---------- Carton helpers for Option 2 ----------
 def extract_carton_numbers(zpl: str):
     """
@@ -341,9 +363,10 @@ with col_right:
     st.markdown(
         """
 - **Option 1**: `.prn` → OpenAI standardization (5.5x2.5 cm, 203 DPI, ^PW440 ^LL200 ^LH0,0, ^FO30→40, ^FO330→340) → LabelZoom PQ=1 → Python duplicates page to match original **PQ**  
+  - Output filename: `HANGTAG BARCODE - <code_row>.pdf` (ex: `HANGTAG BARCODE - C 50036 0008 0005 U.pdf`)  
 - **Option 2**: `.prn` → LabelZoom PDF with **fixed 10x4 cm @ 203 DPI**  
-- Option 2 shows **carton sequences per file** from ^FD 10-digit lines  
-- Option 2 filenames: `CARTON BARCODE S 50019 0023 0002.pdf` (Produto code from label)  
+  - Shows **carton sequences per file** from ^FD 10-digit lines  
+  - Filenames: `CARTON BARCODE S 50019 0023 0002.pdf` (Produto code from label)  
 - API keys from **secrets** or **environment variables**:
   - `openai_api_key` / `OPENAI_API_KEY`
   - `labelzoom_api_key` / `LABELZOOM_API_KEY`
@@ -393,8 +416,13 @@ if process_clicked and uploaded_files:
                     # Duplicate page PQ times (based on original PQ)
                     pdf_bytes = replicate_single_page_pdf(single_pdf_bytes, pq_value)
 
-                    base_name = Path(uploaded.name).stem
-                    pdf_name = f"{base_name}.pdf"
+                    # Extract model/code row for filename
+                    code_row = extract_hangtag_model_code(final_zpl)
+                    if code_row:
+                        pdf_name = f"HANGTAG BARCODE - {code_row}.pdf"
+                    else:
+                        base_name = Path(uploaded.name).stem
+                        pdf_name = f"{base_name}.pdf"
 
                 else:
                     # ----- OPTION 2: Carton barcodes -----
