@@ -466,19 +466,22 @@ if process_clicked and uploaded_files:
             st.success(f"Done! Processed {len(results)} file(s).")
 
             # Per-file display
-            for item in results:
+            for i, item in enumerate(results):
                 with st.expander(f"📄 {item['pdf_name']} ({item['original_name']})"):
                     st.download_button(
                         "⬇️ Download PDF",
                         data=item["pdf_bytes"],
                         file_name=item["pdf_name"],
                         mime="application/pdf",
+                        key=f"download_pdf_{i}",
                     )
                     st.text_area(
                         "Final ZPL sent to LabelZoom:",
                         value=item["zpl"],
                         height=260,
                     )
+        ...
+
 
                     # Extra info for Option 1
                     if "Product Hangtag" in option:
