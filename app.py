@@ -166,39 +166,50 @@ def convert_zpl_to_pdf_with_labelzoom(zpl: str) -> bytes:
     return resp.content
 
 
-def extract_numeric_strings_from_zpl(zpl: str, min_digits: int = 4) -> list[str]:
+def extract_carton_numbers(zpl: str) -> list[str]:
     """
-    Extract numeric strings from ZPL that *could* be carton numbers.
+    Extract the carton sequence number from lines like:
 
-    Strategy:
-    - Find all sequences of digits with at least `min_digits`.
-    - We'll later pick the most common length across all labels as the
-      "carton number" length for sequence analysis.
+    ^FO160,197^A0N,105,100^FR^FD1044217560^FS
+    ^FO430,35^BY2^BCN,100^FD>:1044217560^FS
+
+    We look specifically at ^FD ... ^FS segments that contain a 10-digit number,
+    with optional >: prefix.
     """
-    return re.findall(rf"\d{{{min_digits},}}", zpl)
+    matches = re.findall(
+        r"\^FD\s*(?:>:\s*)?(\d{10})\s*\^FS",
+        zpl,
+        flags=re.IGNORECASE,
+    )
+    # Deduplicate while preserving order
+    seen = set()
+    result = []
+    for m in matches:
+        if m not in seen:
+            seen.add(m)
+            result.append(m)
+    return result
 
 
-def group_into_sequences(sorted_codes: list[str]) -> list[tuple[int, int]]:
+def group_sequences_from_codes(codes: list[str]) -> list[tuple[int, int]]:
     """
-    Given a list of numeric strings already sorted by integer value,
-    group them into contiguous sequences.
+    Group a list of numeric string codes (e.g. '1044217560') into contiguous sequences.
 
-    Returns a list of (start_int, end_int) tuples.
+    Returns a list of (start_int, end_int).
     """
-    if not sorted_codes:
+    if not codes:
         return []
 
-    ints = [int(c) for c in sorted_codes]
-    sequences = []
-    start = prev = ints[0]
+    unique_ints = sorted({int(c) for c in codes})
+    sequences: list[tuple[int, int]] = []
 
-    for v in ints[1:]:
+    start = prev = unique_ints[0]
+    for v in unique_ints[1:]:
         if v == prev + 1:
             prev = v
         else:
             sequences.append((start, prev))
             start = prev = v
-
     sequences.append((start, prev))
     return sequences
 
@@ -257,7 +268,7 @@ with col_right:
         """
 - ✅ **Option 1**: `.prn` → OpenAI standardization → LabelZoom PDF  
 - ✅ **Option 2**: `.prn` → LabelZoom PDF with **fixed 10×4 cm @ 203 DPI**  
-- 🔍 Option 2 also groups carton numbers into **sequences**, so you can spot skips.  
+- 🔍 Option 2: carton sequences based **only** on the ^FD lines with the 10-digit number  
 - 📁 Option 2 filenames: `CARTON BARCODE S 50019 0023 0002.pdf` (Produto code from label)  
 - 🔐 API keys loaded from **secrets** or **environment variables**:
   - `openai_api_key` / `OPENAI_API_KEY`
@@ -283,14 +294,13 @@ if process_clicked and uploaded_files:
 
             raw_zpl = read_prn_file(uploaded)
             final_zpl = raw_zpl
-            numeric_candidates = []
+            carton_numbers: list[str] = []
             produto_code = None
 
             try:
                 if "Product Hangtag" in option:
                     # Option 1: standardize via OpenAI, template controls size
                     final_zpl = standardize_zpl_with_openai(raw_zpl, model=model_name)
-                    # Name based on original file
                     base_name = Path(uploaded.name).stem
                     pdf_name = f"{base_name}.pdf"
                 else:
@@ -301,14 +311,13 @@ if process_clicked and uploaded_files:
                         height_cm=4.0,
                         dpi=203,
                     )
-                    # Extract numeric candidates and Produto code
-                    numeric_candidates = extract_numeric_strings_from_zpl(final_zpl, min_digits=4)
+                    # Extract carton sequence number(s) and Produto code
+                    carton_numbers = extract_carton_numbers(final_zpl)
                     produto_code = extract_produto_code(final_zpl)
 
                     if produto_code:
                         pdf_name = f"CARTON BARCODE {produto_code}.pdf"
                     else:
-                        # Fallback to base file name if Produto code isn't found
                         base_name = Path(uploaded.name).stem
                         pdf_name = f"CARTON BARCODE {base_name}.pdf"
 
@@ -320,7 +329,7 @@ if process_clicked and uploaded_files:
                         "pdf_name": pdf_name,
                         "pdf_bytes": pdf_bytes,
                         "zpl": final_zpl,
-                        "numeric_candidates": numeric_candidates,
+                        "carton_numbers": carton_numbers,
                         "produto_code": produto_code,
                     }
                 )
@@ -352,46 +361,35 @@ if process_clicked and uploaded_files:
                     if "Carton Barcodes" in option:
                         if item["produto_code"]:
                             st.markdown(f"**Produto code detected:** `{item['produto_code']}`")
-                        if item["numeric_candidates"]:
-                            st.markdown("**Numeric codes detected in this label (raw candidates):**")
-                            st.code(", ".join(item["numeric_candidates"]))
+                        if item["carton_numbers"]:
+                            st.markdown("**Carton sequence number(s) found in this label:**")
+                            st.code(", ".join(item["carton_numbers"]))
 
             # Global sequence analysis for Option 2
             if "Carton Barcodes" in option:
-                all_candidates = []
+                all_carton_codes = []
                 for item in results:
-                    all_candidates.extend(item["numeric_candidates"])
+                    all_carton_codes.extend(item["carton_numbers"])
 
-                if not all_candidates:
+                if not all_carton_codes:
                     st.info(
-                        "No numeric codes (with ≥4 digits) were detected in the ZPL. "
-                        "If your carton numbers follow another pattern, we can tweak the extractor."
+                        "No carton sequence numbers (10-digit ^FD fields) were detected. "
+                        "If your pattern changes, we can tweak the extractor."
                     )
                 else:
-                    from collections import Counter
+                    sequences = group_sequences_from_codes(all_carton_codes)
 
-                    length_counts = Counter(len(c) for c in all_candidates)
-                    primary_len, _ = max(length_counts.items(), key=lambda x: x[1])
-
-                    primary_codes = [c for c in all_candidates if len(c) == primary_len]
-                    unique_primary_codes = sorted(set(primary_codes), key=lambda x: int(x))
-
-                    sequences = group_into_sequences(unique_primary_codes)
-
-                    st.subheader("📦 Carton barcode sequences (based on numeric codes)")
+                    st.subheader("📦 Carton barcode sequences (from ^FD lines)")
                     st.write(
-                        f"Detected **{len(unique_primary_codes)}** unique codes of length "
-                        f"**{primary_len}** (likely your carton numbers), grouped into "
-                        f"**{len(sequences)}** sequence(s)."
+                        f"Detected **{len(set(all_carton_codes))}** unique carton numbers, "
+                        f"grouped into **{len(sequences)}** sequence(s)."
                     )
 
                     for i, (start_int, end_int) in enumerate(sequences, start=1):
                         if start_int == end_int:
-                            label = f"{start_int:0{primary_len}d}"
+                            label = f"{start_int:010d}"
                         else:
-                            start_str = f"{start_int:0{primary_len}d}"
-                            end_str = f"{end_int:0{primary_len}d}"
-                            label = f"{start_str} → {end_str}"
+                            label = f"{start_int:010d} - {end_int:010d}"
                         st.markdown(f"- **Sequence {i}:** {label}")
 
             # ---- Download all PDFs as one ZIP (both options) ----
