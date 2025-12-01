@@ -275,7 +275,6 @@ def extract_hangtag_model_code(zpl: str) -> str | None:
     if not m:
         return None
     code = m.group(1)
-    # Normalize internal spacing a bit, but keep the structure
     code = re.sub(r"\s+", " ", code).strip()
     return code if code else None
 
@@ -479,9 +478,8 @@ if process_clicked and uploaded_files:
                         "Final ZPL sent to LabelZoom:",
                         value=item["zpl"],
                         height=260,
+                        key=f"zpl_text_{i}",
                     )
-        ...
-
 
                     # Extra info for Option 1
                     if "Product Hangtag" in option:
@@ -502,12 +500,12 @@ if process_clicked and uploaded_files:
 
                             sequences = group_sequences_from_codes(item["carton_numbers"])
                             st.markdown("**Carton sequence(s) for this file:**")
-                            for i, (start_int, end_int) in enumerate(sequences, start=1):
+                            for j, (start_int, end_int) in enumerate(sequences, start=1):
                                 if start_int == end_int:
                                     label = f"{start_int:010d}"
                                 else:
                                     label = f"{start_int:010d} - {end_int:010d}"
-                                st.markdown(f"- Sequence {i}: {label}")
+                                st.markdown(f"- Sequence {j}: {label}")
                         else:
                             st.markdown("_No carton numbers detected in this file._")
 
@@ -523,4 +521,5 @@ if process_clicked and uploaded_files:
                 data=zip_buffer,
                 file_name="labels.zip",
                 mime="application/zip",
+                key="download_zip_all_pdfs",
             )
