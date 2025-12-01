@@ -19,7 +19,7 @@ st.set_page_config(
 st.title("🏷️ ZPL Label Helper")
 st.caption(
     "Option 1: Standardize hangtag ZPL with OpenAI → LabelZoom PDF • "
-    "Option 2: Carton barcodes → LabelZoom PDF (10×4 cm @ 203 DPI) + sequence check"
+    "Option 2: Carton barcodes → LabelZoom PDF (10×4 cm @ 203 DPI) + per-file sequence check"
 )
 
 
@@ -268,7 +268,7 @@ with col_right:
         """
 - ✅ **Option 1**: `.prn` → OpenAI standardization → LabelZoom PDF  
 - ✅ **Option 2**: `.prn` → LabelZoom PDF with **fixed 10×4 cm @ 203 DPI**  
-- 🔍 Option 2 now shows **carton sequences per file** based only on the ^FD lines with the 10-digit number  
+- 🔍 Option 2 shows **carton sequences per file** based only on the ^FD lines with the 10-digit number  
 - 📁 Option 2 filenames: `CARTON BARCODE S 50019 0023 0002.pdf` (Produto code from label)  
 - 🔐 API keys loaded from **secrets** or **environment variables**:
   - `openai_api_key` / `OPENAI_API_KEY`
@@ -378,26 +378,6 @@ if process_clicked and uploaded_files:
                                 st.markdown(f"- Sequence {i}: {label}")
                         else:
                             st.markdown("_No carton numbers detected in this file._")
-
-            # (Optional) tiny global overview if multiple files in Option 2
-            if "Carton Barcodes" in option and len(results) > 1:
-                all_cartons = []
-                for item in results:
-                    all_cartons.extend(item["carton_numbers"])
-
-                if all_cartons:
-                    global_sequences = group_sequences_from_codes(all_cartons)
-                    st.subheader("📦 Global overview (all files combined)")
-                    st.write(
-                        f"Total **{len(set(all_cartons))}** unique carton numbers across all files, "
-                        f"grouped into **{len(global_sequences)}** sequence(s)."
-                    )
-                    for i, (start_int, end_int) in enumerate(global_sequences, start=1):
-                        if start_int == end_int:
-                            label = f"{start_int:010d}"
-                        else:
-                            label = f"{start_int:010d} - {end_int:010d}"
-                        st.markdown(f"- Global sequence {i}: {label}")
 
             # ---- Download all PDFs as one ZIP (both options) ----
             zip_buffer = io.BytesIO()
