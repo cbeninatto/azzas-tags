@@ -1,6 +1,7 @@
 import io
 import os
 import zipfile
+import re
 from pathlib import Path
 
 import requests
@@ -16,7 +17,10 @@ st.set_page_config(
 )
 
 st.title("🏷️ ZPL Label Helper")
-st.caption("Option 1: Standardize hangtag ZPL with OpenAI → LabelZoom PDF • Option 2: Carton barcodes → LabelZoom PDF")
+st.caption(
+    "Option 1: Standardize hangtag ZPL with OpenAI → LabelZoom PDF • "
+    "Option 2: Carton barcodes → LabelZoom PDF (10×4 cm @ 203 DPI)"
+)
 
 
 # ---------- Secrets / clients ----------
@@ -30,7 +34,7 @@ if OPENAI_API_KEY:
 # Your private LabelZoom API base; behaves like the public one
 LABELZOOM_ZPL_TO_PDF_URL = "https://prod-api.labelzoom.net/api/v2/convert/zpl/to/pdf"
 
-# 🔧 Put your real template + rules here
+# 🔧 Put your real template + rules here for hangtags
 STANDARDIZATION_SYSTEM_PROMPT = """
 You are a ZPL label expert.
 
@@ -104,6 +108,45 @@ def standardize_zpl_with_openai(raw_zpl: str, model: str = "gpt-5.1-mini") -> st
     return strip_code_fences(zpl_text)
 
 
+def apply_manual_label_size(
+    zpl: str,
+    width_cm: float = 10.0,
+    height_cm: float = 4.0,
+    dpi: int = 203,
+) -> str:
+    """
+    Force the ZPL label to a fixed physical size by setting ^PW (width)
+    and ^LL (length) in dots.
+
+    For 203 DPI, we use 8 dpmm (8 dots/mm), which is the standard density.
+    10 cm  -> 100 mm -> 100 * 8 = 800 dots
+    4 cm   ->  40 mm ->  40 * 8 = 320 dots
+    """
+    # Map DPI to dpmm (round to the nearest supported density: 6, 8, 12, 24)
+    dpmm = int(round(dpi / 25.4))  # 203 -> 8
+
+    width_mm = width_cm * 10.0
+    height_mm = height_cm * 10.0
+
+    width_dots = int(round(width_mm * dpmm))
+    height_dots = int(round(height_mm * dpmm))
+
+    # Remove existing ^PW / ^LL to avoid conflicts
+    cleaned = re.sub(r"\^PW-?\d+", "", zpl, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\^LL-?\d+", "", cleaned, flags=re.IGNORECASE)
+
+    # Insert ^PW / ^LL right after the first ^XA
+    match = re.search(r"\^XA", cleaned, flags=re.IGNORECASE)
+    size_cmds = f"^PW{width_dots}^LL{height_dots}"
+
+    if match:
+        insert_at = match.end()
+        return cleaned[:insert_at] + size_cmds + cleaned[insert_at:]
+    else:
+        # Best-effort fallback: just prepend size commands at the start
+        return f"^XA{size_cmds}{cleaned}"
+
+
 def convert_zpl_to_pdf_with_labelzoom(zpl: str) -> bytes:
     if not LABELZOOM_API_KEY:
         raise RuntimeError("LabelZoom API key is not configured.")
@@ -132,7 +175,7 @@ with col_left:
         "Choose what you want to do:",
         [
             "Option 1: Product Hangtag (standardize ZPL with OpenAI, then PDF)",
-            "Option 2: Carton Barcodes (direct ZPL → PDF)",
+            "Option 2: Carton Barcodes (10×4 cm @ 203 DPI → PDF)",
         ],
         index=0,
     )
@@ -158,7 +201,7 @@ with col_right:
     st.markdown(
         """
 - ✅ **Option 1**: `.prn` → OpenAI standardization → LabelZoom PDF  
-- ✅ **Option 2**: `.prn` → LabelZoom PDF (no OpenAI)  
+- ✅ **Option 2**: `.prn` → LabelZoom PDF with **fixed 10×4 cm @ 203 DPI**  
 - 🔐 API keys loaded from **secrets** or **environment variables**:
   - `openai_api_key` / `OPENAI_API_KEY`
   - `labelzoom_api_key` / `LABELZOOM_API_KEY`
@@ -186,7 +229,16 @@ if process_clicked and uploaded_files:
 
             try:
                 if "Product Hangtag" in option:
+                    # Option 1: standardize via OpenAI, let DIMS come from template
                     final_zpl = standardize_zpl_with_openai(raw_zpl, model=model_name)
+                else:
+                    # Option 2: enforce manual size 10×4 cm at 203 DPI
+                    final_zpl = apply_manual_label_size(
+                        raw_zpl,
+                        width_cm=10.0,
+                        height_cm=4.0,
+                        dpi=203,
+                    )
 
                 pdf_bytes = convert_zpl_to_pdf_with_labelzoom(final_zpl)
 
