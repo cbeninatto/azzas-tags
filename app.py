@@ -158,7 +158,12 @@ def enforce_hangtag_standard(zpl: str) -> str:
     return text
 
 
-def apply_manual_label_size(zpl: str, width_cm: float = 10.0, height_cm: float = 4.0, dpi: int = 203) -> str:
+def apply_manual_label_size(
+    zpl: str,
+    width_cm: float = 10.0,
+    height_cm: float = 4.0,
+    dpi: int = 203,
+) -> str:
     """Used in Option 2 for 10x4 cm @ 203 DPI."""
     dpmm = int(round(dpi / 25.4))
     width_mm = width_cm * 10.0
@@ -316,16 +321,34 @@ def group_sequences_from_codes(codes):
     return sequences
 
 
-def extract_produto_code(zpl: str):
+def extract_produto_code(zpl: str) -> str | None:
     """
-    Extract 'Produto' code like: S 50019 0023 0002 from ZPL.
-    Example: ^FD S 50019 0023 0002 U^FS
+    Extract the 'Produto' code like: S 50019 0023 0002 from the ZPL for Option 2.
+
+    Typical line example:
+      ^FO30,74^A0N,20,20^FDS 50019 0023 0002 U^FS
+
+    We want to capture only:
+      S 50019 0023 0002   (without the trailing letter such as U)
     """
-    match = re.search(r"(S\s*\d{5}\s*\d{4}\s*\d{4})", zpl)
-    if not match:
+    # Look for an ^FD field that starts with S and the 5-4-4 digit pattern
+    m = re.search(
+        r"\^FD\s*(S\s*\d{5}\s*\d{4}\s*\d{4})\b",
+        zpl,
+        flags=re.IGNORECASE,
+    )
+    if not m:
         return None
-    code = match.group(1)
-    return re.sub(r"\s+", " ", code).strip()
+
+    code = m.group(1)
+    # Normalize spaces: S 50019 0023 0002
+    code = re.sub(r"\s+", " ", code).strip()
+    # Force capital S at the start just to be consistent
+    if not code.upper().startswith("S"):
+        return None
+    # Ensure S is uppercase, rest unchanged
+    code = "S" + code[1:]
+    return code
 
 
 # ---------- UI ----------
@@ -365,7 +388,7 @@ with col_right:
   - Output filename: `HANGTAG BARCODE - <code_row>.pdf` (ex: `HANGTAG BARCODE - C 50036 0008 0005 U.pdf`)  
 - **Option 2**: `.prn` → LabelZoom PDF with **fixed 10x4 cm @ 203 DPI**  
   - Shows **carton sequences per file** from ^FD 10-digit lines  
-  - Filenames: `CARTON BARCODE S 50019 0023 0002.pdf` (Produto code from label)  
+  - Output filename: `CARTON BARCODE S 50019 0023 0002.pdf` (Produto code from label)  
 - API keys from **secrets** or **environment variables**:
   - `openai_api_key` / `OPENAI_API_KEY`
   - `labelzoom_api_key` / `LABELZOOM_API_KEY`
@@ -377,9 +400,13 @@ process_clicked = st.button("Process files", type="primary", disabled=not upload
 
 if process_clicked and uploaded_files:
     if "Product Hangtag" in option and not OPENAI_API_KEY:
-        st.error("OpenAI API key not configured. Set `openai_api_key` in Streamlit secrets or `OPENAI_API_KEY` env var.")
+        st.error(
+            "OpenAI API key not configured. Set `openai_api_key` in Streamlit secrets or `OPENAI_API_KEY` env var."
+        )
     elif not LABELZOOM_API_KEY:
-        st.error("LabelZoom API key not configured. Set `labelzoom_api_key` in Streamlit secrets or `LABELZOOM_API_KEY` env var.")
+        st.error(
+            "LabelZoom API key not configured. Set `labelzoom_api_key` in Streamlit secrets or `LABELZOOM_API_KEY` env var."
+        )
     else:
         results = []
         progress_bar = st.progress(0.0)
@@ -492,15 +519,23 @@ if process_clicked and uploaded_files:
                     # Extra info for Option 2
                     if "Carton Barcodes" in option:
                         if item["produto_code"]:
-                            st.markdown(f"**Produto code detected:** `{item['produto_code']}`")
+                            st.markdown(
+                                f"**Produto code detected:** `{item['produto_code']}`"
+                            )
 
                         if item["carton_numbers"]:
-                            st.markdown("**Carton number(s) found in this file (from ^FD lines):**")
+                            st.markdown(
+                                "**Carton number(s) found in this file (from ^FD lines):**"
+                            )
                             st.code(", ".join(item["carton_numbers"]))
 
-                            sequences = group_sequences_from_codes(item["carton_numbers"])
+                            sequences = group_sequences_from_codes(
+                                item["carton_numbers"]
+                            )
                             st.markdown("**Carton sequence(s) for this file:**")
-                            for j, (start_int, end_int) in enumerate(sequences, start=1):
+                            for j, (start_int, end_int) in enumerate(
+                                sequences, start=1
+                            ):
                                 if start_int == end_int:
                                     label = f"{start_int:010d}"
                                 else:
