@@ -323,26 +323,25 @@ def group_sequences_from_codes(codes):
 
 def extract_produto_code(zpl: str) -> str | None:
     """
-    Robustly extract the 'Produto' code like: S 50019 0023 0002 from the ZPL for Option 2.
+    Robustly extract the 'Produto' code like: C 50039 0020 0002 or S 50019 0023 0002.
 
-    Typical patterns (examples):
-      ^FO30,74^A0N,20,20^FDS 50019 0023 0002 U^FS
-      ^FD   PROD: S 50019 0023 0002   U^FS
-
-    We want to capture only:
-      S 50019 0023 0002   (without any trailing letter such as U)
+    It will:
+      - Scan every ^FD ... ^FS block
+      - Look for any single LETTER followed by 5-4-4 digits (with flexible spacing)
+        e.g.: C 50039 0020 0002, S 50019 0023 0002
+      - Ignore trailing letters such as U (since they are outside the 4-digit block)
     """
     # Get all FD fields
     fd_fields = re.findall(r"\^FD(.*?)\^FS", zpl, flags=re.IGNORECASE | re.DOTALL)
     for field in fd_fields:
-        # Find S + 5-4-4 digits with flexible spacing, anywhere inside the field
-        m = re.search(r"S\s*\d{5}\s*\d{4}\s*\d{4}", field, flags=re.IGNORECASE)
+        # Any letter + 5-4-4 digits, flexible spaces
+        m = re.search(r"[A-Z]\s*\d{5}\s*\d{4}\s*\d{4}", field, flags=re.IGNORECASE)
         if m:
             code = m.group(0)
-            # Normalize spaces
+            # Normalize spaces, keep the leading letter
             code = re.sub(r"\s+", " ", code).strip()
-            # Force S uppercase
-            code = "S" + code[1:]
+            # First char as uppercase letter
+            code = code[0].upper() + code[1:]
             return code
     return None
 
@@ -384,7 +383,7 @@ with col_right:
   - Output filename: `HANGTAG BARCODE - <code_row>.pdf` (ex: `HANGTAG BARCODE - C 50036 0008 0005 U.pdf`)  
 - **Option 2**: `.prn` → LabelZoom PDF with **fixed 10x4 cm @ 203 DPI**  
   - Shows **carton sequences per file** from ^FD 10-digit lines  
-  - Output filename (when code is found): `CARTON BARCODE S 50019 0023 0002.pdf`  
+  - Output filename (when code is found): `CARTON BARCODE C 50039 0020 0002.pdf` or `CARTON BARCODE S 50019 0023 0002.pdf`  
 - API keys from **secrets** or **environment variables**:
   - `openai_api_key` / `OPENAI_API_KEY`
   - `labelzoom_api_key` / `LABELZOOM_API_KEY`
