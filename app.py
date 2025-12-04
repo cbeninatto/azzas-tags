@@ -267,21 +267,28 @@ def extract_hangtag_model_code(zpl: str) -> str | None:
     """
     Extract the hangtag 'code row' used for naming Option 1 PDFs.
 
-    Example line (after standardization):
-      ^FO40,74^A0N,20,20^FDC 50036 0008 0005 U^FS
+    We don't rely on specific coordinates anymore.
+    Instead we:
+      - Scan every ^FD ... ^FS block
+      - Look for any pattern like:
+          <LETTER> 12345 1234 1234 [optional LETTER]
+        e.g. "C 40008 0012 0002 U", "C 40008 0012 0001 U", "S 50019 0023 0002"
 
-    We capture: "C 50036 0008 0005 U"
+    We return the normalized code, e.g. "C 40008 0012 0002 U".
     """
-    m = re.search(
-        r"\^FO40,74\^A0N,20,20\^FD(.*?)\^FS",
-        zpl,
-        flags=re.IGNORECASE,
-    )
-    if not m:
-        return None
-    code = m.group(1)
-    code = re.sub(r"\s+", " ", code).strip()
-    return code if code else None
+    fd_fields = re.findall(r"\^FD(.*?)\^FS", zpl, flags=re.IGNORECASE | re.DOTALL)
+    for field in fd_fields:
+        m = re.search(
+            r"[A-Z]\s*\d{5}\s*\d{4}\s*\d{4}(?:\s*[A-Z])?",
+            field,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            code = m.group(0)
+            code = re.sub(r"\s+", " ", code).strip()
+            code = code[0].upper() + code[1:]  # ensure first letter uppercase
+            return code
+    return None
 
 
 # ---------- Carton helpers for Option 2 ----------
@@ -331,16 +338,12 @@ def extract_produto_code(zpl: str) -> str | None:
         e.g.: C 50039 0020 0002, S 50019 0023 0002
       - Ignore trailing letters such as U (since they are outside the 4-digit block)
     """
-    # Get all FD fields
     fd_fields = re.findall(r"\^FD(.*?)\^FS", zpl, flags=re.IGNORECASE | re.DOTALL)
     for field in fd_fields:
-        # Any letter + 5-4-4 digits, flexible spaces
         m = re.search(r"[A-Z]\s*\d{5}\s*\d{4}\s*\d{4}", field, flags=re.IGNORECASE)
         if m:
             code = m.group(0)
-            # Normalize spaces, keep the leading letter
             code = re.sub(r"\s+", " ", code).strip()
-            # First char as uppercase letter
             code = code[0].upper() + code[1:]
             return code
     return None
@@ -380,7 +383,7 @@ with col_right:
     st.markdown(
         """
 - **Option 1**: `.prn` → OpenAI standardization (5.5x2.5 cm, 203 DPI, ^PW440 ^LL200 ^LH0,0, ^FO30→40, ^FO330→340) → LabelZoom PQ=1 → Python duplicates page to match original **PQ**  
-  - Output filename: `HANGTAG BARCODE - <code_row>.pdf` (ex: `HANGTAG BARCODE - C 50036 0008 0005 U.pdf`)  
+  - Output filename: `HANGTAG BARCODE - <code_row>.pdf` (e.g. `HANGTAG BARCODE - C 40008 0012 0002 U.pdf`)  
 - **Option 2**: `.prn` → LabelZoom PDF with **fixed 10x4 cm @ 203 DPI**  
   - Shows **carton sequences per file** from ^FD 10-digit lines  
   - Output filename (when code is found): `CARTON BARCODE C 50039 0020 0002.pdf` or `CARTON BARCODE S 50019 0023 0002.pdf`  
