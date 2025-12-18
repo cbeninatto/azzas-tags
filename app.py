@@ -7,7 +7,7 @@ from pathlib import Path
 import requests
 import streamlit as st
 from openai import OpenAI
-from pypdf import PdfReader, PdfWriter  # for duplicating pages based on PQ
+from pypdf import PdfReader, PdfWriter  # for duplicating pages and rotating
 
 
 # ---------- Config ----------
@@ -19,8 +19,9 @@ st.set_page_config(
 
 st.title("🏷️ ZPL Label Helper")
 st.caption(
-    "Option 1: Product Hangtag (OpenAI standardization → LabelZoom PDF, with PQ page duplication) • "
-    "Option 2: Carton barcodes (10x4 cm @ 203 DPI → PDF + per-file sequence check)"
+    "Option 1: Product Hangtag (Arezzo-style: OpenAI standardization → LabelZoom PDF with PQ duplication) • "
+    "Option 2: Carton barcodes (10×4 cm @ 203 DPI → PDF + per-file sequence) • "
+    "Option 3: Reserva hangtag barcode (8×3.5 cm @ 203 DPI → rotated PDF)"
 )
 
 
@@ -173,11 +174,11 @@ def enforce_hangtag_standard(zpl: str) -> str:
 
 def apply_manual_label_size(
     zpl: str,
-    width_cm: float = 10.0,
-    height_cm: float = 4.0,
+    width_cm: float,
+    height_cm: float,
     dpi: int = 203,
 ) -> str:
-    """Used in Option 2 for 10x4 cm @ 203 DPI."""
+    """Apply label size using ^PW (width) and ^LL (height) for a given size and DPI."""
     dpmm = int(round(dpi / 25.4))
     width_mm = width_cm * 10.0
     height_mm = height_cm * 10.0
@@ -212,6 +213,29 @@ def convert_zpl_to_pdf_with_labelzoom(zpl: str) -> bytes:
     )
     resp.raise_for_status()
     return resp.content
+
+
+def rotate_pdf(pdf_bytes: bytes, degrees: int = 90) -> bytes:
+    """
+    Rotate all pages in a PDF by `degrees`.
+    Positive values are usually counterclockwise in pypdf.
+    """
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+    for page in reader.pages:
+        try:
+            page = page.rotate(degrees)
+        except Exception:
+            # fallback for older pypdf versions
+            try:
+                page.rotate_clockwise(degrees)
+            except Exception:
+                pass
+        writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out.read()
 
 
 # ---------- PQ helpers for Option 1 ----------
@@ -361,6 +385,30 @@ def extract_produto_code(zpl: str) -> str | None:
     return None
 
 
+# ---------- Reserva helpers for Option 3 ----------
+def extract_reserva_code(zpl: str) -> str | None:
+    """
+    Extract Reserva product code for naming Option 3 PDFs.
+
+    Example from your sample:
+      ^FO495,030^ADR,20,10^FH^FDR4602200040001^FS
+
+    We capture: R4602200040001  (R + 13 digits).
+    """
+    fd_fields = re.findall(r"\^FD(.*?)\^FS", zpl, flags=re.IGNORECASE | re.DOTALL)
+    for field in fd_fields:
+        m = re.search(r"R\d{13}", field, flags=re.IGNORECASE)
+        if m:
+            code = m.group(0).upper()
+            return code
+    # fallback: just capture a 13-digit EAN if no R-code found
+    for field in fd_fields:
+        m = re.search(r"\d{13}", field)
+        if m:
+            return m.group(0)
+    return None
+
+
 # ---------- UI ----------
 col_left, col_right = st.columns([2, 1])
 
@@ -368,8 +416,9 @@ with col_left:
     option = st.radio(
         "Choose what you want to do:",
         [
-            "Option 1: Product Hangtag (standardize ZPL with OpenAI, then PDF with PQ duplication)",
-            "Option 2: Carton Barcodes (10x4 cm @ 203 DPI → PDF + per-file sequence check)",
+            "Option 1: Product Hangtag (Arezzo-style: standardize with OpenAI, then PDF with PQ duplication)",
+            "Option 2: Carton Barcodes (10×4 cm @ 203 DPI → PDF + per-file sequence)",
+            "Option 3: Reserva Hangtag Barcode (8×3.5 cm @ 203 DPI → rotated PDF)",
         ],
         index=0,
     )
@@ -385,7 +434,7 @@ with col_left:
     model_name = None
     if "Product Hangtag" in option:
         model_name = st.selectbox(
-            "OpenAI model for standardization:",
+            "OpenAI model for standardization (Option 1 only):",
             ["gpt-5.1-mini", "gpt-5.1"],
             index=0,
             help="Cheaper model first; use the larger one if needed.",
@@ -395,15 +444,27 @@ with col_right:
     st.subheader("Status")
     st.markdown(
         """
-- **Multi-label files**: If a `.prn` has multiple `^XA ... ^XZ` blocks, each block becomes its own output file.  
-- **Option 1**: `.prn` → split into labels → OpenAI standardization (5.5x2.5 cm, 203 DPI, ^PW440 ^LL200 ^LH0,0, ^FO30→40, ^FO330→340) → LabelZoom PQ=1 → Python duplicates page to match original **PQ**  
-  - Output filenames: `HANGTAG BARCODE - <code_row>.pdf`
-- **Option 2**: `.prn` → split into labels → LabelZoom PDF with **fixed 10x4 cm @ 203 DPI**  
-  - Shows **carton sequences per label** from ^FD 10-digit lines  
-  - Output filenames: `CARTON BARCODE <Produto code>.pdf`
-- API keys from **secrets** or **environment variables**:
-  - `openai_api_key` / `OPENAI_API_KEY`
-  - `labelzoom_api_key` / `LABELZOOM_API_KEY`
+**Multi-label .prn files**
+
+- Any file with multiple `^XA ... ^XZ` blocks is automatically split into multiple labels.
+
+**Option 1 – Product Hangtag (Arezzo)**  
+- 5.5 × 2.5 cm @ 203 DPI  
+- ^PW440 ^LL200 ^LH0,0, ^FO30→^FO40, ^FO330→^FO340  
+- OpenAI cleans and standardizes layout  
+- LabelZoom renders **PQ=1**, then Python duplicates the page to match original **PQ**  
+- Filenames: `HANGTAG BARCODE - <code_row>.pdf`  
+  (e.g. `HANGTAG BARCODE - C 40008 0012 0002 U.pdf`)
+
+**Option 2 – Carton Barcodes**  
+- 10 × 4 cm @ 203 DPI  
+- Shows sequences from 10-digit ^FD lines per label  
+- Filenames: `CARTON BARCODE <Produto code>.pdf`
+
+**Option 3 – Reserva Hangtag Barcode**  
+- 8 × 3.5 cm @ 203 DPI  
+- Uses LabelZoom, then rotates the PDF by 90° so the sticker is vertical  
+- Filenames: `RESERVA HANGTAG BARCODE - R4602200040001.pdf` (or similar)
         """
     )
 
@@ -450,6 +511,7 @@ if process_clicked and uploaded_files:
                     final_zpl = segment_zpl
                     carton_numbers = []
                     produto_code = None
+                    reserva_code = None
                     pq_value = None
                     pdf_bytes = b""
 
@@ -481,7 +543,7 @@ if process_clicked and uploaded_files:
                                 base_name = Path(uploaded.name).stem
                                 pdf_name = f"{base_name}_part{seg_idx}.pdf"
 
-                        else:
+                        elif "Carton Barcodes" in option:
                             # ----- OPTION 2: Carton barcodes (per label) -----
                             final_zpl = apply_manual_label_size(
                                 segment_zpl,
@@ -500,6 +562,28 @@ if process_clicked and uploaded_files:
 
                             pdf_bytes = convert_zpl_to_pdf_with_labelzoom(final_zpl)
 
+                        else:
+                            # ----- OPTION 3: Reserva hangtag barcode (per label) -----
+                            # Set label size: 8 cm width × 3.5 cm height @ 203 DPI
+                            final_zpl = apply_manual_label_size(
+                                segment_zpl,
+                                width_cm=8.0,
+                                height_cm=3.5,
+                                dpi=203,
+                            )
+                            reserva_code = extract_reserva_code(final_zpl)
+
+                            if reserva_code:
+                                pdf_name = f"RESERVA HANGTAG BARCODE - {reserva_code}.pdf"
+                            else:
+                                base_name = Path(uploaded.name).stem
+                                pdf_name = f"RESERVA HANGTAG BARCODE - {base_name}_part{seg_idx}.pdf"
+
+                            # Convert to PDF
+                            raw_pdf = convert_zpl_to_pdf_with_labelzoom(final_zpl)
+                            # Rotate PDF so label is vertical (90° rotation)
+                            pdf_bytes = rotate_pdf(raw_pdf, degrees=90)
+
                         results.append(
                             {
                                 "original_name": uploaded.name,
@@ -510,6 +594,7 @@ if process_clicked and uploaded_files:
                                 "zpl": final_zpl,
                                 "carton_numbers": carton_numbers,
                                 "produto_code": produto_code,
+                                "reserva_code": reserva_code,
                                 "pq": pq_value,
                             }
                         )
@@ -524,7 +609,9 @@ if process_clicked and uploaded_files:
             status_placeholder.empty()
 
             if results:
-                st.success(f"Done! Processed {len(results)} label(s) across {len(uploaded_files)} file(s).")
+                st.success(
+                    f"Done! Processed {len(results)} label(s) across {len(uploaded_files)} file(s)."
+                )
 
                 # Per-label display
                 for i, item in enumerate(results):
@@ -583,16 +670,23 @@ if process_clicked and uploaded_files:
                             else:
                                 st.markdown("_No carton numbers detected in this label._")
 
-                # Download all PDFs as one ZIP
+                        # Extra info for Option 3
+                        if "Reserva Hangtag" in option:
+                            if item.get("reserva_code"):
+                                st.markdown(
+                                    f"**Reserva code detected:** `{item['reserva_code']}`"
+                                )
+
+                # Download all PDFs as one ZIP (fixed)
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                     for item in results:
                         zf.writestr(item["pdf_name"], item["pdf_bytes"])
-                zip_buffer.seek(0)
+                zip_bytes = zip_buffer.getvalue()
 
                 st.download_button(
                     "⬇️ Download all PDFs (ZIP)",
-                    data=zip_buffer,
+                    data=zip_bytes,
                     file_name="labels.zip",
                     mime="application/zip",
                     key="download_zip_all_pdfs",
