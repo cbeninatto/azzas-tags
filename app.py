@@ -21,7 +21,7 @@ st.title("🏷️ ZPL Label Helper")
 st.caption(
     "Option 1: Product Hangtag (Arezzo-style: OpenAI standardization → LabelZoom PDF with PQ duplication) • "
     "Option 2: Carton barcodes (10×4 cm @ 203 DPI → PDF + per-file sequence) • "
-    "Option 3: Reserva hangtag barcode (8×3.5 cm @ 203 DPI → rotated PDF)"
+    "Option 3: Reserva hangtag barcode (8×3.5 cm @ 203 DPI → rotated PDF, grouped by SKU)"
 )
 
 
@@ -184,10 +184,8 @@ def apply_manual_label_size(
     height_mm = height_cm * 10.0
     width_dots = int(round(width_mm * dpmm))
     height_dots = int(round(height_mm * dpmm))
-
     cleaned = re.sub(r"\^PW-?\d+", "", zpl, flags=re.IGNORECASE)
     cleaned = re.sub(r"\^LL-?\d+", "", cleaned, flags=re.IGNORECASE)
-
     match = re.search(r"\^XA", cleaned, flags=re.IGNORECASE)
     size_cmds = f"^PW{width_dots}^LL{height_dots}"
     if match:
@@ -226,7 +224,6 @@ def rotate_pdf(pdf_bytes: bytes, degrees: int = 90) -> bytes:
         try:
             page = page.rotate(degrees)
         except Exception:
-            # fallback for older pypdf versions
             try:
                 page.rotate_clockwise(degrees)
             except Exception:
@@ -284,16 +281,13 @@ def replicate_single_page_pdf(single_page_pdf: bytes, copies: int) -> bytes:
     """Duplicate a 1-page PDF `copies` times. If copies <= 1, return original."""
     if copies <= 1:
         return single_page_pdf
-
     reader = PdfReader(io.BytesIO(single_page_pdf))
     if len(reader.pages) == 0:
         return single_page_pdf
-
     writer = PdfWriter()
     page = reader.pages[0]
     for _ in range(copies):
         writer.add_page(page)
-
     out = io.BytesIO()
     writer.write(out)
     out.seek(0)
@@ -304,14 +298,11 @@ def extract_hangtag_model_code(zpl: str) -> str | None:
     """
     Extract the hangtag 'code row' used for naming Option 1 PDFs.
 
-    We don't rely on specific coordinates anymore.
-    Instead we:
+    We:
       - Scan every ^FD ... ^FS block
-      - Look for any pattern like:
+      - Look for pattern:
           <LETTER> 12345 1234 1234 [optional LETTER]
         e.g. "C 40008 0012 0002 U", "C 50039 0020 0002 U", "S 50019 0023 0002"
-
-    We return the normalized code, e.g. "C 40008 0012 0002 U".
     """
     fd_fields = re.findall(r"\^FD(.*?)\^FS", zpl, flags=re.IGNORECASE | re.DOTALL)
     for field in fd_fields:
@@ -323,7 +314,7 @@ def extract_hangtag_model_code(zpl: str) -> str | None:
         if m:
             code = m.group(0)
             code = re.sub(r"\s+", " ", code).strip()
-            code = code[0].upper() + code[1:]  # ensure first letter uppercase
+            code = code[0].upper() + code[1:]
             return code
     return None
 
@@ -368,11 +359,6 @@ def group_sequences_from_codes(codes):
 def extract_produto_code(zpl: str) -> str | None:
     """
     Robustly extract the 'Produto' code like: C 50039 0020 0002 or S 50019 0023 0002.
-
-    It will:
-      - Scan every ^FD ... ^FS block
-      - Look for any single LETTER followed by 5-4-4 digits (with flexible spacing)
-        e.g.: C 50039 0020 0002, S 50019 0023 0002
     """
     fd_fields = re.findall(r"\^FD(.*?)\^FS", zpl, flags=re.IGNORECASE | re.DOTALL)
     for field in fd_fields:
@@ -390,18 +376,17 @@ def extract_reserva_code(zpl: str) -> str | None:
     """
     Extract Reserva product code for naming Option 3 PDFs.
 
-    Example from your sample:
-      ^FO495,030^ADR,20,10^FH^FDR4602200040001^FS
+    Example:
+      ^FDR4602200040001^FS  -> code: R4602200040001
 
-    We capture: R4602200040001  (R + 13 digits).
+    We capture 'R' + 13 digits. If that fails, fall back to any 13-digit code.
     """
     fd_fields = re.findall(r"\^FD(.*?)\^FS", zpl, flags=re.IGNORECASE | re.DOTALL)
     for field in fd_fields:
         m = re.search(r"R\d{13}", field, flags=re.IGNORECASE)
         if m:
-            code = m.group(0).upper()
-            return code
-    # fallback: just capture a 13-digit EAN if no R-code found
+            return m.group(0).upper()
+    # fallback: plain 13-digit sequence (likely an EAN)
     for field in fd_fields:
         m = re.search(r"\d{13}", field)
         if m:
@@ -423,16 +408,23 @@ with col_left:
         index=0,
     )
 
+    is_option1 = option.startswith("Option 1")
+    is_option2 = option.startswith("Option 2")
+    is_option3 = option.startswith("Option 3")
+
     uploaded_files = st.file_uploader(
         "Upload your .prn files (or .zpl/.txt with ZPL):",
         type=["prn", "zpl", "txt"],
         accept_multiple_files=True,
-        help="You can drag & drop multiple files at once.\n"
-             "If a file has many ^XA…^XZ blocks, each label will be split and processed separately.",
+        help=(
+            "You can drag & drop multiple files at once.\n"
+            "If a file has many ^XA…^XZ blocks, each label will be split and processed separately.\n"
+            "For Option 3 (Reserva), labels with the same SKU will be merged into one PDF."
+        ),
     )
 
     model_name = None
-    if "Product Hangtag" in option:
+    if is_option1:
         model_name = st.selectbox(
             "OpenAI model for standardization (Option 1 only):",
             ["gpt-5.1-mini", "gpt-5.1"],
@@ -453,17 +445,17 @@ with col_right:
 - ^PW440 ^LL200 ^LH0,0, ^FO30→^FO40, ^FO330→^FO340  
 - OpenAI cleans and standardizes layout  
 - LabelZoom renders **PQ=1**, then Python duplicates the page to match original **PQ**  
-- Filenames: `HANGTAG BARCODE - <code_row>.pdf`  
-  (e.g. `HANGTAG BARCODE - C 40008 0012 0002 U.pdf`)
+- Filenames: `HANGTAG BARCODE - <code_row>.pdf`
 
 **Option 2 – Carton Barcodes**  
 - 10 × 4 cm @ 203 DPI  
-- Shows sequences from 10-digit ^FD lines per label  
+- Shows sequences from 10-digit ^FD lines **per label**  
 - Filenames: `CARTON BARCODE <Produto code>.pdf`
 
 **Option 3 – Reserva Hangtag Barcode**  
 - 8 × 3.5 cm @ 203 DPI  
-- Uses LabelZoom, then rotates the PDF by 90° so the sticker is vertical  
+- Each label converted with LabelZoom, rotated -90° (vertical, upright)  
+- All labels with the same Reserva code (SKU) are **merged into a single PDF**  
 - Filenames: `RESERVA HANGTAG BARCODE - R4602200040001.pdf` (or similar)
         """
     )
@@ -472,7 +464,7 @@ with col_right:
 process_clicked = st.button("Process files", type="primary", disabled=not uploaded_files)
 
 if process_clicked and uploaded_files:
-    if "Product Hangtag" in option and not OPENAI_API_KEY:
+    if is_option1 and not OPENAI_API_KEY:
         st.error(
             "OpenAI API key not configured. Set `openai_api_key` in Streamlit secrets or `OPENAI_API_KEY` env var."
         )
@@ -494,7 +486,8 @@ if process_clicked and uploaded_files:
         if total_segments == 0:
             st.error("No ^XA...^XZ blocks found in the uploaded files.")
         else:
-            results = []
+            results = []            # final outputs used for UI + ZIP
+            reserva_segments = []   # only for Option 3 grouping
             progress_bar = st.progress(0.0)
             status_placeholder = st.empty()
 
@@ -516,7 +509,7 @@ if process_clicked and uploaded_files:
                     pdf_bytes = b""
 
                     try:
-                        if "Product Hangtag" in option:
+                        if is_option1:
                             # ----- OPTION 1: Standardize + PQ-based duplication (per label) -----
                             pq_value = extract_pq_value(segment_zpl)
 
@@ -543,7 +536,22 @@ if process_clicked and uploaded_files:
                                 base_name = Path(uploaded.name).stem
                                 pdf_name = f"{base_name}_part{seg_idx}.pdf"
 
-                        elif "Carton Barcodes" in option:
+                            results.append(
+                                {
+                                    "original_name": uploaded.name,
+                                    "segment_index": seg_idx,
+                                    "segment_total": len(segments),
+                                    "pdf_name": pdf_name,
+                                    "pdf_bytes": pdf_bytes,
+                                    "zpl": final_zpl,
+                                    "carton_numbers": carton_numbers,
+                                    "produto_code": produto_code,
+                                    "reserva_code": reserva_code,
+                                    "pq": pq_value,
+                                }
+                            )
+
+                        elif is_option2:
                             # ----- OPTION 2: Carton barcodes (per label) -----
                             final_zpl = apply_manual_label_size(
                                 segment_zpl,
@@ -562,9 +570,23 @@ if process_clicked and uploaded_files:
 
                             pdf_bytes = convert_zpl_to_pdf_with_labelzoom(final_zpl)
 
-                        else:
-                            # ----- OPTION 3: Reserva hangtag barcode (per label) -----
-                            # Set label size: 8 cm width × 3.5 cm height @ 203 DPI
+                            results.append(
+                                {
+                                    "original_name": uploaded.name,
+                                    "segment_index": seg_idx,
+                                    "segment_total": len(segments),
+                                    "pdf_name": pdf_name,
+                                    "pdf_bytes": pdf_bytes,
+                                    "zpl": final_zpl,
+                                    "carton_numbers": carton_numbers,
+                                    "produto_code": produto_code,
+                                    "reserva_code": reserva_code,
+                                    "pq": pq_value,
+                                }
+                            )
+
+                        elif is_option3:
+                            # ----- OPTION 3: Reserva hangtag barcode (per label, to be grouped) -----
                             final_zpl = apply_manual_label_size(
                                 segment_zpl,
                                 width_cm=8.0,
@@ -573,31 +595,20 @@ if process_clicked and uploaded_files:
                             )
                             reserva_code = extract_reserva_code(final_zpl)
 
-                            if reserva_code:
-                                pdf_name = f"RESERVA HANGTAG BARCODE - {reserva_code}.pdf"
-                            else:
-                                base_name = Path(uploaded.name).stem
-                                pdf_name = f"RESERVA HANGTAG BARCODE - {base_name}_part{seg_idx}.pdf"
-
-                            # Convert to PDF
+                            # Convert to PDF and rotate -90 so it's vertical & upright
                             raw_pdf = convert_zpl_to_pdf_with_labelzoom(final_zpl)
-                            # Rotate PDF so label is vertical (90° rotation)
-                            pdf_bytes = rotate_pdf(raw_pdf, degrees=270)
+                            pdf_bytes = rotate_pdf(raw_pdf, degrees=-90)
 
-                        results.append(
-                            {
-                                "original_name": uploaded.name,
-                                "segment_index": seg_idx,
-                                "segment_total": len(segments),
-                                "pdf_name": pdf_name,
-                                "pdf_bytes": pdf_bytes,
-                                "zpl": final_zpl,
-                                "carton_numbers": carton_numbers,
-                                "produto_code": produto_code,
-                                "reserva_code": reserva_code,
-                                "pq": pq_value,
-                            }
-                        )
+                            reserva_segments.append(
+                                {
+                                    "original_name": uploaded.name,
+                                    "segment_index": seg_idx,
+                                    "segment_total": len(segments),
+                                    "reserva_code": reserva_code,
+                                    "pdf_bytes": pdf_bytes,
+                                    "zpl": final_zpl,
+                                }
+                            )
 
                     except Exception as e:
                         st.error(
@@ -608,15 +619,64 @@ if process_clicked and uploaded_files:
 
             status_placeholder.empty()
 
+            # If Option 3, group segments by Reserva code and build final results
+            if is_option3 and reserva_segments:
+                grouped = {}
+                for entry in reserva_segments:
+                    key = entry["reserva_code"]
+                    if not key:
+                        # fallback key if no code detected
+                        key = f"{entry['original_name']}_part{entry['segment_index']}"
+                    grouped.setdefault(key, []).append(entry)
+
+                for reserva_code, entries in grouped.items():
+                    # merge PDFs
+                    writer = PdfWriter()
+                    for e in sorted(
+                        entries, key=lambda x: (x["original_name"], x["segment_index"])
+                    ):
+                        reader = PdfReader(io.BytesIO(e["pdf_bytes"]))
+                        for page in reader.pages:
+                            writer.add_page(page)
+                    out = io.BytesIO()
+                    writer.write(out)
+                    out.seek(0)
+                    merged_pdf = out.read()
+
+                    pdf_name = f"RESERVA HANGTAG BARCODE - {reserva_code}.pdf"
+                    original_names = sorted(
+                        {e["original_name"] for e in entries}
+                    )
+                    example_zpl = entries[0]["zpl"]
+
+                    results.append(
+                        {
+                            "original_name": ", ".join(original_names),
+                            "segment_index": None,
+                            "segment_total": len(entries),
+                            "pdf_name": pdf_name,
+                            "pdf_bytes": merged_pdf,
+                            "zpl": example_zpl,
+                            "carton_numbers": [],
+                            "produto_code": None,
+                            "reserva_code": reserva_code,
+                            "pq": None,
+                            "labels_count": len(entries),
+                        }
+                    )
+
             if results:
                 st.success(
-                    f"Done! Processed {len(results)} label(s) across {len(uploaded_files)} file(s)."
+                    f"Done! Generated {len(results)} PDF file(s) across {len(uploaded_files)} uploaded file(s)."
                 )
 
-                # Per-label display
+                # Per-output display
                 for i, item in enumerate(results):
                     original_label = item["original_name"]
-                    if item.get("segment_total", 1) > 1:
+                    if (
+                        item.get("segment_total", 1) > 1
+                        and item.get("segment_index") is not None
+                    ):
                         original_label += f" – part {item['segment_index']}/{item['segment_total']}"
 
                     with st.expander(f"📄 {item['pdf_name']} ({original_label})"):
@@ -628,28 +688,26 @@ if process_clicked and uploaded_files:
                             key=f"download_pdf_{i}",
                         )
                         st.text_area(
-                            "Final ZPL sent to LabelZoom:",
+                            "Final ZPL sent to LabelZoom (example):",
                             value=item["zpl"],
                             height=260,
                             key=f"zpl_text_{i}",
                         )
 
                         # Extra info for Option 1
-                        if "Product Hangtag" in option:
-                            if item["pq"] is not None:
-                                st.markdown(
-                                    f"**PQ detected in original ZPL for this label:** `{item['pq']}` "
-                                    "label(s). PDF pages were duplicated to match this quantity."
-                                )
+                        if is_option1 and item.get("pq") is not None:
+                            st.markdown(
+                                f"**PQ detected in original ZPL for this label:** `{item['pq']}` "
+                                "label(s). PDF pages were duplicated to match this quantity."
+                            )
 
                         # Extra info for Option 2
-                        if "Carton Barcodes" in option:
-                            if item["produto_code"]:
+                        if is_option2:
+                            if item.get("produto_code"):
                                 st.markdown(
                                     f"**Produto code detected:** `{item['produto_code']}`"
                                 )
-
-                            if item["carton_numbers"]:
+                            if item.get("carton_numbers"):
                                 st.markdown(
                                     "**Carton number(s) found in this label (from ^FD lines):**"
                                 )
@@ -667,17 +725,20 @@ if process_clicked and uploaded_files:
                                     else:
                                         label = f"{start_int:010d} - {end_int:010d}"
                                     st.markdown(f"- Sequence {j}: {label}")
-                            else:
+                            elif not is_option3:
                                 st.markdown("_No carton numbers detected in this label._")
 
                         # Extra info for Option 3
-                        if "Reserva Hangtag" in option:
-                            if item.get("reserva_code"):
+                        if is_option3 and item.get("reserva_code"):
+                            st.markdown(
+                                f"**Reserva code (SKU) in this file:** `{item['reserva_code']}`"
+                            )
+                            if item.get("labels_count"):
                                 st.markdown(
-                                    f"**Reserva code detected:** `{item['reserva_code']}`"
+                                    f"**Number of labels merged in this PDF:** `{item['labels_count']}`"
                                 )
 
-                # Download all PDFs as one ZIP (fixed)
+                # Download all PDFs as one ZIP
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                     for item in results:
