@@ -582,7 +582,7 @@ if process_clicked and uploaded_files:
                             # Convert to PDF
                             raw_pdf = convert_zpl_to_pdf_with_labelzoom(final_zpl)
                             # Rotate PDF so label is vertical (90° rotation)
-                            pdf_bytes = rotate_pdf(raw_pdf, degrees=90)
+                            pdf_bytes = rotate_pdf(raw_pdf, degrees=270)
 
                         results.append(
                             {
